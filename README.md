@@ -28,8 +28,6 @@ Set this in your local `.env` and in Vercel project env vars:
 DATABASE_URL=postgresql://username:password@host:5432/database
 ```
 
-If Prisma gives a `prisma://` URL, use the direct PostgreSQL URL instead.
-
 ## Local Development
 
 1. Install frontend deps:
