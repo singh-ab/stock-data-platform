@@ -19,6 +19,12 @@ myenv
 /.next/
 /out/
 
+#python
+/api/app/__pycache__
+__pycache__
+/api/app/*.pyc
+/api/app/*.pyd
+
 # production
 /build
 
