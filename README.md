@@ -19,7 +19,7 @@ This project uses a single repository for:
 - `GET /api/compare` aligns overlapping dates for two symbols and computes relative return series.
 - `GET /api/briefing/{symbol}` builds a short LLM summary from latest stock stats plus recent headlines.
 - Briefings use a period-aware prompt so larger windows (for example 365d) emphasize broader trend movement.
-- Frontend briefing responses are cached in session storage to reduce repeated LLM calls for the same symbol/day window.
+- Frontend briefing responses are *cached in session storage* to reduce repeated LLM calls for the same symbol/day window.
 
 API endpoints are exposed under `/api/*`:
 
