@@ -45,6 +45,20 @@ type ComparePayload = {
   points: ComparePoint[];
 };
 
+type BriefingPayload = {
+  symbol: string;
+  summary: string;
+  model: string;
+  headlines_used: number;
+  headlines_lookback_days: number;
+  generated_at: string;
+};
+
+type BriefingCacheEntry = {
+  savedAt: number;
+  payload: BriefingPayload;
+};
+
 type ChartSeries = {
   label: string;
   color: string;
@@ -52,6 +66,77 @@ type ChartSeries = {
 };
 
 const DAY_OPTIONS = [30, 90, 180, 365] as const;
+const BRIEFING_CACHE_PREFIX = "stock-briefing-v1";
+const BRIEFING_CACHE_TTL_MS = 1000 * 60 * 45;
+
+function briefingCacheKey(symbol: string, days: number): string {
+  return `${BRIEFING_CACHE_PREFIX}:${symbol.toUpperCase()}:${days}`;
+}
+
+function readBriefingFromCache(
+  symbol: string,
+  days: number,
+): BriefingPayload | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const raw = window.sessionStorage.getItem(briefingCacheKey(symbol, days));
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as BriefingCacheEntry;
+    if (!parsed?.savedAt || !parsed?.payload) {
+      return null;
+    }
+    if (Date.now() - parsed.savedAt > BRIEFING_CACHE_TTL_MS) {
+      window.sessionStorage.removeItem(briefingCacheKey(symbol, days));
+      return null;
+    }
+    return parsed.payload;
+  } catch {
+    return null;
+  }
+}
+
+function writeBriefingToCache(
+  symbol: string,
+  days: number,
+  payload: BriefingPayload,
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const entry: BriefingCacheEntry = {
+    savedAt: Date.now(),
+    payload,
+  };
+  window.sessionStorage.setItem(
+    briefingCacheKey(symbol, days),
+    JSON.stringify(entry),
+  );
+}
+
+function clearBriefingCache(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const keysToDelete: string[] = [];
+  for (let i = 0; i < window.sessionStorage.length; i += 1) {
+    const key = window.sessionStorage.key(i);
+    if (key && key.startsWith(`${BRIEFING_CACHE_PREFIX}:`)) {
+      keysToDelete.push(key);
+    }
+  }
+
+  for (const key of keysToDelete) {
+    window.sessionStorage.removeItem(key);
+  }
+}
 
 function apiUrl(path: string): string {
   const base = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
@@ -106,7 +191,13 @@ function utcDate(value: string): string {
   return new Date(`${value}T00:00:00Z`).toLocaleDateString();
 }
 
-function LineChart({ labels, series }: { labels: string[]; series: ChartSeries[] }) {
+function LineChart({
+  labels,
+  series,
+}: {
+  labels: string[];
+  series: ChartSeries[];
+}) {
   if (!labels.length || !series.length) {
     return (
       <div className="rounded-2xl border border-white/50 bg-white/80 p-5 text-sm text-slate-600">
@@ -118,7 +209,9 @@ function LineChart({ labels, series }: { labels: string[]; series: ChartSeries[]
   const width = 960;
   const height = 360;
   const padding = 36;
-  const flatValues = series.flatMap((item) => item.values).filter((v) => Number.isFinite(v));
+  const flatValues = series
+    .flatMap((item) => item.values)
+    .filter((v) => Number.isFinite(v));
   const min = Math.min(...flatValues);
   const max = Math.max(...flatValues);
   const spread = max - min || 1;
@@ -155,7 +248,9 @@ function LineChart({ labels, series }: { labels: string[]; series: ChartSeries[]
         })}
 
         {series.map((s) => {
-          const points = s.values.map((value, index) => `${xFor(index)},${yFor(value)}`).join(" ");
+          const points = s.values
+            .map((value, index) => `${xFor(index)},${yFor(value)}`)
+            .join(" ");
           return (
             <polyline
               key={s.label}
@@ -171,8 +266,14 @@ function LineChart({ labels, series }: { labels: string[]; series: ChartSeries[]
       </svg>
       <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-700">
         {series.map((s) => (
-          <div key={s.label} className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1">
-            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: s.color }} />
+          <div
+            key={s.label}
+            className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1"
+          >
+            <span
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: s.color }}
+            />
             <span>{s.label}</span>
           </div>
         ))}
@@ -194,6 +295,9 @@ export default function Home() {
   const [points, setPoints] = useState<StockPoint[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [compare, setCompare] = useState<ComparePayload | null>(null);
+  const [briefing, setBriefing] = useState<BriefingPayload | null>(null);
+  const [briefingLoading, setBriefingLoading] = useState<boolean>(false);
+  const [briefingError, setBriefingError] = useState<string>("");
 
   async function loadCompanies() {
     const list = await requestJson<Company[]>("/api/companies");
@@ -212,14 +316,20 @@ export default function Home() {
 
   async function loadSelectedData(symbol: string, selectedDays: number) {
     const [dataPayload, summaryPayload] = await Promise.all([
-      requestJson<StockPoint[]>(`/api/data/${encodeURIComponent(symbol)}?days=${selectedDays}`),
+      requestJson<StockPoint[]>(
+        `/api/data/${encodeURIComponent(symbol)}?days=${selectedDays}`,
+      ),
       requestJson<Summary>(`/api/summary/${encodeURIComponent(symbol)}`),
     ]);
     setPoints(dataPayload);
     setSummary(summaryPayload);
   }
 
-  async function loadCompare(symbol1: string, symbol2: string, selectedDays: number) {
+  async function loadCompare(
+    symbol1: string,
+    symbol2: string,
+    selectedDays: number,
+  ) {
     if (!symbol1 || !symbol2 || symbol1 === symbol2) {
       setCompare(null);
       return;
@@ -227,10 +337,37 @@ export default function Home() {
 
     const payload = await requestJson<ComparePayload>(
       `/api/compare?symbol1=${encodeURIComponent(symbol1)}&symbol2=${encodeURIComponent(
-        symbol2
-      )}&days=${selectedDays}`
+        symbol2,
+      )}&days=${selectedDays}`,
     );
     setCompare(payload);
+  }
+
+  async function loadBriefing(symbol: string, selectedDays: number) {
+    const cached = readBriefingFromCache(symbol, selectedDays);
+    if (cached) {
+      setBriefingError("");
+      setBriefing(cached);
+      setBriefingLoading(false);
+      return;
+    }
+
+    setBriefingLoading(true);
+    setBriefingError("");
+    try {
+      const payload = await requestJson<BriefingPayload>(
+        `/api/briefing/${encodeURIComponent(symbol)}?days=${selectedDays}`,
+      );
+      setBriefing(payload);
+      writeBriefingToCache(symbol, selectedDays, payload);
+    } catch (err) {
+      setBriefing(null);
+      setBriefingError(
+        err instanceof Error ? err.message : "Failed to generate AI briefing",
+      );
+    } finally {
+      setBriefingLoading(false);
+    }
   }
 
   async function bootstrap() {
@@ -251,12 +388,16 @@ export default function Home() {
     setToast("");
 
     try {
-      await requestJson<{ message: string }>("/api/refresh", { method: "POST" });
+      await requestJson<{ message: string }>("/api/refresh", {
+        method: "POST",
+      });
+      clearBriefingCache();
       setToast("Data refresh complete.");
       await loadCompanies();
 
       if (selectedSymbol) {
         await loadSelectedData(selectedSymbol, days);
+        await loadBriefing(selectedSymbol, days);
       }
       if (selectedSymbol && compareSymbol) {
         await loadCompare(selectedSymbol, compareSymbol, days);
@@ -285,12 +426,15 @@ export default function Home() {
     void (async () => {
       try {
         await loadSelectedData(selectedSymbol, days);
+        await loadBriefing(selectedSymbol, days);
         if (compareSymbol) {
           await loadCompare(selectedSymbol, compareSymbol, days);
         }
       } catch (err) {
         if (mounted) {
-          setError(err instanceof Error ? err.message : "Failed to load symbol data");
+          setError(
+            err instanceof Error ? err.message : "Failed to load symbol data",
+          );
         }
       } finally {
         if (mounted) {
@@ -349,10 +493,15 @@ export default function Home() {
       <main className="relative z-10 mx-auto grid w-full max-w-350 grid-cols-1 gap-6 p-4 md:p-6 lg:grid-cols-[300px_1fr]">
         <aside className="rounded-3xl border border-white/40 bg-white/85 p-5 shadow-[0_20px_60px_-40px_rgba(15,23,42,0.45)] backdrop-blur">
           <div className="mb-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Stock Data</p>
-            <h1 className="mt-2 text-2xl font-bold tracking-tight text-slate-900">Market Dashboard</h1>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+              Stock Data
+            </p>
+            <h1 className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
+              Market Dashboard
+            </h1>
             <p className="mt-2 text-sm text-slate-600">
-              FastAPI analytics with moving averages, volatility, and stock comparison.
+              FastAPI analytics with moving averages, volatility, and stock
+              comparison.
             </p>
           </div>
 
@@ -383,7 +532,9 @@ export default function Home() {
           </div>
 
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Companies</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Companies
+            </p>
             <div className="max-h-90 space-y-2 overflow-y-auto pr-1">
               {companies.map((company) => (
                 <button
@@ -396,8 +547,12 @@ export default function Home() {
                       : "border-slate-200 bg-white hover:border-slate-300"
                   }`}
                 >
-                  <p className="text-sm font-semibold text-slate-900">{company.symbol}</p>
-                  <p className="truncate text-xs text-slate-500">{company.name}</p>
+                  <p className="text-sm font-semibold text-slate-900">
+                    {company.symbol}
+                  </p>
+                  <p className="truncate text-xs text-slate-500">
+                    {company.name}
+                  </p>
                 </button>
               ))}
             </div>
@@ -406,7 +561,9 @@ export default function Home() {
 
         <section className="space-y-6">
           {error ? (
-            <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
+            <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              {error}
+            </div>
           ) : null}
           {toast ? (
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
@@ -416,42 +573,109 @@ export default function Home() {
 
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-2xl border border-white/45 bg-white/85 p-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Latest Close</p>
-              <p className="mt-2 text-2xl font-bold text-slate-900">{compact(summary?.latest_close)}</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">
+                Latest Close
+              </p>
+              <p className="mt-2 text-2xl font-bold text-slate-900">
+                {compact(summary?.latest_close)}
+              </p>
             </div>
             <div className="rounded-2xl border border-white/45 bg-white/85 p-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Average Close (52w)</p>
-              <p className="mt-2 text-2xl font-bold text-slate-900">{compact(summary?.average_close)}</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">
+                Average Close (52w)
+              </p>
+              <p className="mt-2 text-2xl font-bold text-slate-900">
+                {compact(summary?.average_close)}
+              </p>
             </div>
             <div className="rounded-2xl border border-white/45 bg-white/85 p-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">52w High / Low</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">
+                52w High / Low
+              </p>
               <p className="mt-2 text-2xl font-bold text-slate-900">
                 {compact(summary?.week52_high)} / {compact(summary?.week52_low)}
               </p>
             </div>
             <div className="rounded-2xl border border-white/45 bg-white/85 p-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Latest Volatility</p>
-              <p className="mt-2 text-2xl font-bold text-slate-900">{percent(latestPoint?.volatility_20d)}</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">
+                Latest Volatility
+              </p>
+              <p className="mt-2 text-2xl font-bold text-slate-900">
+                {percent(latestPoint?.volatility_20d)}
+              </p>
             </div>
           </div>
 
           <div className="rounded-3xl border border-white/40 bg-white/85 p-4 shadow-[0_24px_60px_-40px_rgba(15,23,42,0.55)]">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Closing Price Trend</h2>
-                <p className="text-sm text-slate-500">{selectedSymbol || "-"} over the last {days} days</p>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Closing Price Trend
+                </h2>
+                <p className="text-sm text-slate-500">
+                  {selectedSymbol || "-"} over the last {days} days
+                </p>
               </div>
-              <p className="text-xs text-slate-500">{loading ? "Loading..." : `${points.length} data points`}</p>
+              <p className="text-xs text-slate-500">
+                {loading ? "Loading..." : `${points.length} data points`}
+              </p>
             </div>
 
-            <LineChart labels={points.map((item) => item.date)} series={priceSeries} />
+            <LineChart
+              labels={points.map((item) => item.date)}
+              series={priceSeries}
+            />
           </div>
 
           <div className="rounded-3xl border border-white/40 bg-white/85 p-4 shadow-[0_24px_60px_-40px_rgba(15,23,42,0.55)]">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Compare Performance</h2>
-                <p className="text-sm text-slate-500">Relative returns from first overlapping date</p>
+                <h2 className="text-lg font-bold text-slate-900">
+                  AI Daily Briefing
+                </h2>
+                <p className="text-sm text-slate-500">
+                  2-sentence summary based on recent news and market data about{" "}
+                  {selectedSymbol || "-"}
+                </p>
+              </div>
+              <p className="text-xs text-slate-500">
+                {briefing?.generated_at
+                  ? `Updated ${new Date(briefing.generated_at).toLocaleString()}`
+                  : "-"}
+              </p>
+            </div>
+
+            {briefingLoading ? (
+              <p className="rounded-xl bg-slate-100 p-3 text-sm text-slate-600">
+                Generating briefing...
+              </p>
+            ) : briefingError ? (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+                <p className="font-semibold">AI briefing is unavailable</p>
+                <p className="mt-1">{briefingError}</p>
+              </div>
+            ) : briefing ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-sm leading-6 text-slate-800">
+                  AI Summary: {briefing.summary}
+                </p>
+              </div>
+            ) : (
+              <p className="rounded-xl bg-slate-100 p-3 text-sm text-slate-600">
+                No AI briefing yet.
+              </p>
+            )}
+          </div>
+
+          <div className="rounded-3xl border border-white/40 bg-white/85 p-4 shadow-[0_24px_60px_-40px_rgba(15,23,42,0.55)]">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Compare Performance
+                </h2>
+                <p className="text-sm text-slate-500">
+                  Relative returns from first overlapping date
+                </p>
               </div>
 
               <select
@@ -470,22 +694,37 @@ export default function Home() {
               </select>
             </div>
 
-            <LineChart labels={(compare?.points ?? []).map((item) => item.date)} series={compareSeries} />
+            <LineChart
+              labels={(compare?.points ?? []).map((item) => item.date)}
+              series={compareSeries}
+            />
           </div>
 
           <div className="rounded-3xl border border-white/40 bg-white/85 p-4 shadow-[0_24px_60px_-40px_rgba(15,23,42,0.55)]">
-            <h3 className="mb-3 text-base font-bold text-slate-900">Latest Insight</h3>
+            <h3 className="mb-3 text-base font-bold text-slate-900">
+              Latest Insight
+            </h3>
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="rounded-xl bg-slate-100 p-3">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Daily Return</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">{percent(latestPoint?.daily_return)}</p>
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">
+                  Daily Return
+                </p>
+                <p className="mt-1 text-lg font-semibold text-slate-900">
+                  {percent(latestPoint?.daily_return)}
+                </p>
               </div>
               <div className="rounded-xl bg-slate-100 p-3">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">7-Day MA</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">{compact(latestPoint?.moving_avg_7)}</p>
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">
+                  7-Day MA
+                </p>
+                <p className="mt-1 text-lg font-semibold text-slate-900">
+                  {compact(latestPoint?.moving_avg_7)}
+                </p>
               </div>
               <div className="rounded-xl bg-slate-100 p-3">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Latest Date</p>
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">
+                  Latest Date
+                </p>
                 <p className="mt-1 text-lg font-semibold text-slate-900">
                   {latestPoint?.date ? utcDate(latestPoint.date) : "-"}
                 </p>

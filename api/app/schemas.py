@@ -44,3 +44,12 @@ class CompareOut(BaseModel):
     symbol1: str
     symbol2: str
     points: list[ComparePoint]
+
+
+class BriefingOut(BaseModel):
+    symbol: str
+    summary: str
+    model: str
+    headlines_used: int
+    headlines_lookback_days: int
+    generated_at: str

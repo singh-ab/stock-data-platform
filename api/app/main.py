@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
-from .schemas import CompareOut, CompanyOut, StockDataPoint, SummaryOut
+from .schemas import BriefingOut, CompareOut, CompanyOut, StockDataPoint, SummaryOut
+from .services.ai_briefing import BriefingError, build_daily_briefing
 from .services.market_data import (
     build_comparison,
     build_summary,
@@ -87,4 +88,16 @@ def compare(symbol1: str, symbol2: str, days: int = Query(default=30, ge=5, le=3
     payload = build_comparison(db, symbol1, symbol2, days)
     if payload is None:
         raise HTTPException(status_code=404, detail="Could not compare symbols. Run POST /api/refresh first.")
+    return payload
+
+
+@app.get("/api/briefing/{symbol}", response_model=BriefingOut)
+def briefing(symbol: str, days: int = Query(default=30, ge=5, le=365), db: Session = Depends(get_db)):
+    try:
+        payload = build_daily_briefing(db, symbol, days)
+    except BriefingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol.upper()}'.")
     return payload
